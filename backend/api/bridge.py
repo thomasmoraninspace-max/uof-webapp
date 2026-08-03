@@ -402,7 +402,8 @@ def build_uof_sql(body):
         elif date_to:
             clauses.append("Incident_Date <= %s")
             params.append(date_to)
-
+            
+    # Main filter loop
     for col, spec in filters.items():
         # Skip Incident_Date since it's handled separately, and skip any columns not in the allowed list or non-dict specs
         if col == "Incident_Date" or col not in ALLOWED_COLUMNS or not isinstance(spec, dict):
@@ -440,6 +441,7 @@ def build_uof_sql(body):
 
         position_id = MULTI_VALUE_POSITION.get(col)
 
+        # Handle columns with an "in" filter
         if "in" in spec:
             #get all "in" values
             values = [v for v in (spec.get("in") or []) if v not in (None, "")]
