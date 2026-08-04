@@ -1,64 +1,583 @@
-# use_of_force_database_redesign_project
+# UOF Webapp — Project Documentation
 
 View live at: https://1reubent.github.io/uof-webapp/
 
+## Table of Contents
 
-```
-uof-webapp/
-├── frontend/
-│   ├── query-builder.html
-│   └── results-viewer.html
-│
-├── backend/
-│   ├── database/
-│   │   ├── schema_aiven.sql                ← full dump: builds DB from scratch (Aiven/managed MySQL)
-│   │   ├── schema.sql                      ← earlier local-MySQL version, superseded by schema_aiven.sql
-│   │   └── seeds/
-│   │       ├── column_values_seed.sql      ← seeds uof_column_values_data
-│   │       └── standard_values_seed.sql    ← seeds standard_values_table
-│   │
-│   ├── etl/
-│   │   ├── import_script.py                ← Excel → uof_main_processing_table
-│   │   └── clean_and_populate.py           ← UOFPythonExecutionProgram.py
-│   │
-│   ├── api/
-│   │   └── bridge.py                       ← Flask API: takes a query from the frontend,
-│   │                                           runs it against MySQL, returns JSON results
-│   │
-│   └── config/
-│       ├── db_config.py                    ← builds DB_CONFIG from environment variables (committed, no secrets)
-│       ├── .env.example                    ← checked-in template — copy to .env and fill in (local dev only)
-│       └── ca.pem                          ← Aiven CA cert (gitignored, downloaded from Aiven Console)
-│
-├── data/
-│   └── UoF_database_1k_subset_100120_to_053126.xlsx
-│
-└── docs/
-    ├── Project_Charter_Document.pdf
-    ├── Query_and_Response*-_Input_Form_design.docx
-    └── Query_to_Claude_-\_Return_Data_Form.docx
-```
+- [Section 1: What Is This Project](#section-1-what-is-this-project)
+- [Section 2: Database Schema Design Decisions](#section-2-database-schema-design-decisions)
+- [Section 3: Code Repository Structure](#section-3-code-repository-structure)
+  - [Important Files](#important-files)
+  - [Files That Aren't Important to the Project](#files-that-arent-important-to-the-project)
+- [Section 4: Key Code Files, Broken Down](#section-4-key-code-files-broken-down-bridge-clean_and_populate-etl_delta)
+  - [`backend/api/bridge.py` — The API Layer](#backendapibridgepy--the-api-layer)
+  - [`backend/etl/uof_etl/clean_and_populate.py` — The Cleaning Core](#backendetluof_etlclean_and_populatepy--the-cleaning-core)
+  - [`backend/etl/etl_delta.py` — The Incremental Loader](#backendetletl_deltapy--the-incremental-loader)
+- [Section 5: Building the Database from Scratch](#section-5-building-the-database-from-scratch)
+  - [1. Install the Python Dependencies](#1-install-the-python-dependencies)
+  - [2. Configure the Database Connection](#2-configure-the-database-connection)
+  - [3. Create the Database Tables and Reference Data](#3-create-the-database-tables-and-reference-data)
+  - [4. Add the Source Files](#4-add-the-source-files)
+  - [5. Preview the Initial Load](#5-preview-the-initial-load)
+  - [6. Import and Process the Data](#6-import-and-process-the-data)
+  - [7. Verify the Database Load](#7-verify-the-database-load)
+- [Section 6: Configuring and Running the Website](#section-6-configuring-and-running-the-website)
+  - [Running It Locally](#running-it-locally)
+  - [Hosting It](#hosting-it)
+- [Section 7: Running the Delta Loader](#section-7-running-the-delta-loader)
+  - [Preview an Update](#preview-an-update)
+  - [Import New Records](#import-new-records)
+  - [Update Only the UoF Dataset](#update-only-the-uof-dataset)
+  - [Update Only the ARRIVE Together Dataset](#update-only-the-arrive-together-dataset)
+  - [Optional Batch Size](#optional-batch-size)
 
-# UOF Webapp — Project Documentation
+<!-- ## Documentation Assignments
 
-- Our database schema design decisions - omar
-- The code repository structure - reuben
-- How to build the database from scratch, from running the SQL files, importing the data and running the data cleaning/ETL scripts - omar
-   - schema.sql - builds the empty tables
-   - column_values_seed.sql and standard_values_seed.sql - fills in the ref4rence table
-   - UOF
-      - import_script
-      - clean_and_populate
-   - ARRIVE
-      - import_arrive_data
-      - tokenize_arrive_data
-- How to configure and run the website - reuben
-- How to run the delta loader - omar
+- **Database schema design decisions:** Omar
+- **Code repository structure:** Reuben
+- **Building the database from scratch:** Omar
+- **Configuring and running the website:** Reuben
+- **Running the delta loader:** Omar -->
+
+---
+
+## **SECTION 1:** What Is This Project
+
+A tool that turns two New Jersey public-safety datasets — **Use of Force (UoF)** incident reports and **ARRIVE Together** program data — from raw Excel exports into clean, queryable MySQL databases, with a single browser-based UI for filtering and paging through both.
+
+The project is built out of four layers:
+
+1. **Database schema** (MySQL) — 8 tables total: a raw staging table, a cleaned/standardized table, a tokenized-multi-value table, and two reference tables for UoF, plus a smaller matching pair of tables for ARRIVE. See [Section 2: Database Schema Design Decisions](#section-2-database-schema-design-decisions).
+2. **ETL pipeline** (Python) — For the UoF dataset, we read an Excel export, stage it as-is, then clean and standardize it into the schema, tokenizing multi-value columns. For the ARRIVE dataset, we import the data and only tokenize multi-value columns. See [`clean_and_populate.py` — the cleaning core](#backendetluof_etlclean_and_populatepy--the-cleaning-core) and [Section 5: Building the Database from Scratch](#section-5-building-the-database-from-scratch).
+3. **API layer** (`backend/api/bridge.py`, Flask) — the only piece that talks to MySQL; takes a JSON filter specification from the frontend and returns matching rows from the database. See [`bridge.py` — the API layer](#backendapibridgepy--the-api-layer).
+4. **Frontend** (`frontend/index.html`, static HTML/JS) — a single page with a dataset switcher (UoF ⟷ ARRIVE) that builds a query from user-selected filters and calls the API directly for live results, with CSV/spreadsheet export.
+
+Together, these four layers work as a unified system. Filtering in the browser produces a real query, run against a real database, with real results back in the browser.
+
+---
+
+## **SECTION 2:** Database Schema Design Decisions
+
+**Section owner: Omar**
+
+The database was redesigned to make the Use of Force and ARRIVE Together datasets easier to clean, maintain, and query while preserving the original public records.
+
+- Separates staged, cleaned, and multi-value data to improve organization and filtering.
+- Keeps the UoF and ARRIVE Together datasets in separate structures because they contain different fields and reporting formats.
+- Uses standardization and exception tracking to address inconsistent values without silently removing source data.
+- Supports future dataset updates and the web-based query interface.
+
+Table Breakdown:
+
+| Table | Purpose |
+|-------|---------|
+| `uof_main_processing_table` | Raw staging table, 1:1 with Excel columns, plus a `processed` flag. |
+| `uof_main_data` | Cleaned/standardized "final" table — same shape as staging minus `processed` with an added `Under 18` column. |
+| `uof_dashboard_values_data` | Tokenized multi-value fields: one row per `(Form_Id, Position_Id, Value_Id, Column_Value)` — the normalized form of columns like `Subject_Actions` that can hold multiple selections per incident. It's important to note that only multi-value fields that *actually* have multiple values are tokenized into this table. Single-value entries are maintained in the main table.|
+| `uof_column_values_data` | Static catalog of every valid value per column position — reference/lookup data, not incident data. Loaded using `column_values_seed.sql` |
+| `standard_values_table` | Raw-value → standard-value synonym map used during cleaning. Loaded using `standard_values_seed.sql`|
+| `exceptions_table` | Audit log of values that failed cleaning/standardization, keyed to the original form/column, with a human-readable `reason`. Nothing is silently dropped — everything that doesn't clean cleanly is preserved here for review. |
+| `arrive_main_data`| Table for both staged and cleaned/tokenized arrive data |
+| `arrive_values_data` | The `uof_dashboard_values_data` equivalent for the arrive data. Tokenizes genuinely multi-value fields |
 
 
 ---
 
+## **SECTION 3:** Code Repository Structure
 
+**Section owner: Reuben**
+
+```
+uof-webapp/
+├── backend/
+│   ├── api/
+│   │   └── bridge.py                    ← Flask API: runs queries from the frontend against MySQL, returns JSON
+│   │
+│   ├── config/
+│   │   ├── db_config.py                 ← builds DB_CONFIG from environment variables (committed, no secrets)
+│   │   ├── .env.example                 ← checked-in template — copy to .env and fill in (local dev only)
+│   │   ├── .env                         ← real local credentials (gitignored)
+│   │   └── ca.pem                       ← CA cert (gitignored, only needed if SSL verification is necessary) 
+│   │
+│   ├── database/
+│   │   ├── schema.sql                   ← builds all 8 tables from scratch (run once)
+│   │   └── seeds/
+│   │       ├── column_values_seed.sql   ← seeds uof_column_values_data (valid-value catalog for multi-value fields)
+│   │       └── standard_values_seed.sql ← seeds standard_values_table (synonym/spelling map)
+│   │
+│   └── etl/
+│       ├── etl_delta.py                 ← append-only loader for new UoF and/or ARRIVE Excel exports (can also run cleaner)
+│       ├── uof_etl/
+│       │   ├── import_script.py         ← UoF Excel → uof_main_processing_table (raw staging)
+│       │   └── clean_and_populate.py    ← staging → uof_main_data (cleaning/standardization)
+│       └── arrive_etl/
+│           ├── import_arrive_data.py    ← ARRIVE Excel → arrive_main_data
+│           └── tokenize_arrive_data.py  ← arrive_main_data → arrive_values_data (tokenizing multi-value fields)
+│
+├── frontend/
+│   └── index.html                       ← the live single-page app (query builder + results viewer)
+│
+├── data/                                ← sample/source Excel exports (see below)
+│
+├── docs/                                ← planning docs + earlier prototypes (not part of the running app)
+│
+├── render.yaml                          ← Render deployment blueprint (not necessary; used during development)
+├── requirements.txt                     ← runtime dependencies (Flask API)
+└── requirements-etl.txt                 ← ETL-only dependencies (pandas/numpy/openpyxl)
+```
+
+### Important Files
+
+A one-line orientation to everything in the tree above. Three of these — `bridge.py`, `clean_and_populate.py`, and `etl_delta.py` — are covered in more depth in [Section 4: Key Code Files, Broken Down](#section-4-key-code-files-broken-down-bridge-clean_and_populate-etl_delta) below, as they might be important to understand if you plan on hosting this project's API and database.
+
+- **`backend/api/bridge.py`** — The Flask API; the only piece that talks to MySQL on the frontend's behalf. *(Deep dive below.)*
+
+- **`backend/config/db_config.py`** — Builds the DB connection config from environment variables. Contains no real credentials, so it's safe to commit; every script that touches the database imports from here rather than connecting directly.
+
+- **`backend/config/.env.example`** — Checked-in template for local development. Copy to `.env` (gitignored) and fill it in with the real host/port/user/password for the database connection. Used for setting environment variables during local development
+
+- **`backend/database/schema.sql`** — A `mysqldump`-style structure dump that builds all 8 tables (plus indexes) from scratch. Meant to be run once. Inline comments explain why some columns deviate from their "natural" type. (explained above in [Section 2: Database Schema Design Decisions](#section-2-database-schema-design-decisions))
+
+- **`backend/database/seeds/column_values_seed.sql`** / **`standard_values_seed.sql`** — Static reference data loaded once, independent of any Excel import: `column_values_seed.sql` loads `uof_column_values_data`, the valid-value catalog for multi-value columns. `standard_values_seed.sql` loads `standard_values_table`, the raw-spelling → canonical-spelling synonym map for single-value columns.
+
+- **`backend/etl/uof_etl/import_script.py`** — Reads the UoF Excel file, renames headers to schema column names, and batch-inserts every row as-is into the raw staging table (`uof_main_processing_table`).
+
+- **`backend/etl/uof_etl/clean_and_populate.py`** — moves UoF data from staging → final cleaned tables. *(Deep dive below.)*
+
+- **`backend/etl/arrive_etl/import_arrive_data.py`** — Same shape as `import_script.py`, but for the separate ARRIVE Together dataset: reads the Excel export, converts its multi-value cells from a list to a string, and inserts the new rows into `arrive_main_data`.
+
+- **`backend/etl/arrive_etl/tokenize_arrive_data.py`** — Reads `arrive_main_data` and builds `arrive_values_data`, tokenizing genuinely multi-value cells. Fully builds from scratch each run, so always safe to re-run.
+
+- **`backend/etl/etl_delta.py`** — Append-only loader for new/incremental UoF and ARRIVE Together Excel exports. *(Deep dive below.)*
+
+- **`frontend/index.html`** — The actual running application: a single self-contained HTML/CSS/JS file with a tab switcher between the UoF and ARRIVE datasets, calling `bridge.py` directly for live results.
+
+- **`data/`** — Sample/source Excel exports consumed by the ETL scripts (not read by the app at runtime). Currently contains the full UoF dataset, a ~1k-row UoF subset for quick local testing, and the ARRIVE Together export.
+
+Again, the three most important files to understand if you plan on hosting this project's API and database on your own infrastructure are `bridge.py` (the API file), `clean_and_populate.py` (the UoF cleaning procedure), and `etl_delta.py` (the delta loader). These are explained in depth in the [Section 4: Key Code Files, Broken Down](#section-4-key-code-files-broken-down-bridge-clean_and_populate-etl_delta) section.
+
+### Files That Aren't Important to the Project
+
+- **`render.yaml`** — The Render deployment blueprint, since the API was hosted on Render for development.
+- **`docs/`** — A mix of early planning artifacts (`Project_Charter_Document.pdf`, the two `.docx` form-design docs) and an earlier two-file frontend prototype (`query-builder.html`, `results-viewer.html`) that `frontend/index.html` has since replaced with a live-querying single page. Worth a skim for original project scope/intent, but none of it is part of the running application.
+
+---
+
+## **SECTION 4:** Key Code Files, Broken Down (`bridge`, `clean_and_populate`, `etl_delta`)
+
+**Section owner: Reuben**
+
+If you're hosting this project's API and database on your own infrastructure, these are the three files that might be worth understanding.
+
+### `backend/api/bridge.py` — The API Layer
+
+This is where the MySQL connection is opened on the frontend's behalf in order to answer the user's queries live. Everything else in `backend/` is offline data-prep; `bridge.py` is the live, always-running piece.
+
+- **Endpoints**: `GET /health` is a static endpoint for testing; `GET /filter-values/<dataset>` (`uof` or `arrive`) returns every known value for each categorical column (used for the frontend's autocomplete); `POST /query/uof` and `POST /query/arrive` each take a JSON filter specification (containing the user's inputs) and return matching rows as JSON.
+- **Query building**: `build_uof_sql()` / `build_arrive_sql()` turn a request body into a parameterized SQL string — walked through in detail below. `execute_query()` is the single shared place that actually opens a connection, runs it, and closes it again — used by both.
+- **Security model**: column *names* from the request (which columns to filter or select) are checked against a hardcoded whitelist (`ALLOWED_COLUMNS` / `ARRIVE_ALLOWED_COLUMNS`) before being spliced into the SQL string as identifiers. If you add a new filterable column to the schema, it has to be added to one of these whitelists here, or `bridge.py` will silently ignore it.
+- **Boolean columns** (`Other_Officer_Involved`, `Officer_In_Uniform`, `Officer_Injuries_Injured`, `Under_18`) are stored as `tinyint` 1/0/`NULL` but shown to users as labels like `"True"`/`"False"`/`"Not Provided"`. `BOOLEAN_COLUMN_LABELS` maps one to the other in both directions — check it if a boolean filter or displayed value looks wrong.
+- **Caching**: `/filter-values/<dataset>` is the endpoint that returns autocomplete values. They are requested once on the first page load and cached forever in a plain process-global dict (`_filter_values_cache`).
+   - The autocomplete values are loaded as follows: The values for the 5 standard values columns (`SINGLE_VALUE_COLUMNS`) are loaded by querying `standard_values_table`. The values for 23 multi-value columns (`MULTI_VALUE_POSITION`) are loaded by querying `uof_column_values_data`. The values for the last 3 uncataloged categorical columns (`DISTINCT_VALUE_COLUMNS`) are loaded using a DISTINCT query on the main table. Boolean autocomplete values are stored in the code, and ID fields are not given any autocomplete.
+- **Hosting elsewhere**: This is reiterated in the [Hosting it](#hosting-it) section, but if you plan on hosting the API there are two things to address:
+      1. `frontend/index.html`'s `BASE` constant (currently `https://uof-webapp-api.onrender.com` in production) needs to point at your new host
+      2. `CORS(app)` in `bridge.py` currently allows any origin, which you may want to restrict once you're not just testing.
+      Also, the API runs on port 5001 when run locally. (see [Running it locally](#running-it-locally))
+
+The main SQL query-building logic is in the functions `build_uof_sql()` and `build_arrive_sql()` in `bridge.py`. The primary thing to understand here is how multi-value columns are queried using our `uof_dashboard_values_data` and `arrive_values_data` tables. Since only multi-value columns that actually have multiple values get tokenized, the query needs to check both tables: for a given row and multi-value column, it either has a match in `uof_main_data` or a match in the dashboard values table, but not both. Code: [[L457-477](backend/api/bridge.py#L457-L477)]
+
+### `backend/etl/uof_etl/clean_and_populate.py` — The Cleaning Core
+
+This is the code that runs our cleaning/ETL pipeline after we've imported the data.
+
+- **What it does, in order**: pulls only unprocessed rows (`WHERE processed = 0`) from `uof_main_processing_table`; normalizes whitespace/casing and coerces null-ish strings (`"None"`, `"NaN"`, `""`) to real `NaN`; derives the `Under_18` flag from `Subject_Age` tokens; maps loose boolean text (`yes/true/1/y`, etc.) to 1/0 for the genuinely-boolean columns; parses `Incident_Date`; coerces the genuinely-integer columns; then calls `populate_subtables_and_standardize()`, which does the real work:
+  - **Single-value columns** (`Video_Footage`, `Officer_Rank`, etc.) are looked up in `standard_values_table` and rewritten to their canonical spelling.
+  - **Multi-value columns** (most of the rest) are comma-split into tokens — with a hardcoded `embedded_commas` list protecting values that contain a comma from being split — and each token is validated against `uof_column_values_data`.
+  - As mentioned before, only genuinely multi-valued rows (more than one token) get tokenized into `uof_dashboard_values_data`; single-valued rows are left as plain text directly in `uof_main_data`. This split is what `bridge.py`'s query-building has to account for (see above).
+  - Anything that fails to standardize or validate is logged to `exceptions_table` with a reason, not silently dropped.
+  - **Trimming over-repeated values**: some multi-value columns (`TRIM_TO_SUBJECT_COUNT_COLS`, e.g. `Force_Type`) are meant to hold one value per subject involved in the incident, but source data occasionally repeats the same token more times than there are subjects to justify it. These columns are trimmed so each unique value appears at most once per subject; a repeat that's still within the subject count (e.g. two subjects both hit with "Used arms/hands") is left alone, since that's indistinguishable from two subjects legitimately sharing the same value.
+- **Idempotency**: source rows are marked `processed = 1` at the end, so re-running this script only ever touches rows added since the last run.
+- **Read the inline comments before changing `bool_cols`/`int_cols`**: certain boolean columns (Subject_Arrested) and certain integer columns (Subject_Age) are not added to `bool_cols`/`int_cols` because they are actually stored as strings, because they're multi-value. The inline comments explain further about this.
+- **Depends on**: the staging table (`uof_main_processing_table`) and the reference/seed tables (`standard_values_table`, `uof_column_values_data`) being already populated
+
+### `backend/etl/etl_delta.py` — The Incremental Loader
+
+This tool handles new monthly/quarterly exports for **both** datasets — an alternative to re-running `import_script.py`/`import_arrive_data.py` against a full re-export every time. `--uof-file` and `--arrive-file` are independent: pass either one, or both, and each dataset's delta runs on its own.
+
+- **UoF path** (`--uof-file`): reads and validates the incoming Excel file (drops fully blank rows, renames headers, fills any schema columns missing from this particular export as `NULL`, rejects the file outright if `Form_ID` is missing, non-integer, or has in-file duplicates); checks which of the incoming `Form_ID`s already exist in *either* `uof_main_data` or `uof_main_processing_table`; inserts only the rows that are genuinely new into `uof_main_processing_table`; and, if `--run-cleaners` is passed, chains straight into `clean_and_populate.py`'s `clean_uof_data()` so the newly staged rows get cleaned in the same run.
+- **ARRIVE path** (`--arrive-file`): the same shape, keyed by `Random_ID` instead of `Form_ID` and checked only against `arrive_main_data` (there's no separate staging table for ARRIVE). New rows are inserted directly into `arrive_main_data`; if `--run-cleaners` is passed, it then runs `tokenize_arrive_data.py`, which fully rebuilds `arrive_values_data` from scratch every time rather than appending, so the tokenized table always ends up complete and consistent even though only the newly inserted `arrive_main_data` rows were actually new.
+- **CLI**: `python etl_delta.py --uof-file "UoF_July_2026.xlsx" --arrive-file "ARRIVE_July_2026.xlsx"` stages/inserts new rows for whichever file(s) you pass. Add `--dry-run` to report the delta without inserting anything (use this first on an unfamiliar export), or `--run-cleaners` (alias: `--run-cleaner`) to also run the relevant cleaning/tokenization step(s) immediately afterward. `--batch-size` controls how many rows are committed per round-trip (default 500). The older single-dataset `--file` flag still works as an alias for `--uof-file`, for backwards compatibility.
+
+---
+
+## **SECTION 5:** Building the Database from Scratch
+
+**Section owner: Omar**
+
+Follow these steps when setting up a new or empty database. Run all commands from the project's root folder.
+
+### 1. Install the Python Dependencies
+
+Install the packages required by the web application and ETL scripts.
+
+#### Windows PowerShell
+
+```powershell
+py -m pip install -r requirements.txt
+py -m pip install -r requirements-etl.txt
+```
+
+#### macOS or Linux Terminal
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 -m pip install -r requirements-etl.txt
+```
+
+### 2. Configure the Database Connection
+
+Create a local environment file from the provided template.
+
+#### Windows PowerShell
+
+```powershell
+Copy-Item "backend\config\.env.example" "backend\config\.env"
+```
+
+#### macOS or Linux Terminal
+
+```bash
+cp backend/config/.env.example backend/config/.env
+```
+
+Open `backend/config/.env` and replace the placeholder values with the correct database host, port, username, password, database name, and SSL settings required by the database provider.
+
+The `.env` file contains private credentials and must not be committed to GitHub.
+
+If your database requires SSL (common for managed/cloud MySQL), also set `DB_SSL_CA_PATH` to a CA certificate downloaded from your provider and save it as:
+
+```text
+backend/config/ca.pem
+```
+
+### 3. Create the Database Tables and Reference Data
+
+Use MySQL Workbench, the Aiven Query Editor, or another MySQL client to run these files in order:
+
+1. `backend/database/schema.sql`
+2. `backend/database/seeds/column_values_seed.sql`
+3. `backend/database/seeds/standard_values_seed.sql`
+
+`schema.sql` creates the UoF and ARRIVE Together database tables. The seed files load the reference values used during data cleaning and standardization.
+
+### 4. Add the Source Files
+
+Place the Use of Force and ARRIVE Together Excel files in the project's `data` folder.
+
+Example files included with the project:
+
+- `data/UoF_database_1k_subset_100120_to_053126.xlsx`
+- `data/ARRIVE_Reports_Download_File_7_1_2026.xlsx`
+
+Replace these filenames with the latest source files when updated datasets are released.
+
+### 5. Preview the Initial Load
+
+Run the delta loader in dry-run mode before inserting data.
+
+#### Windows PowerShell
+
+```powershell
+py backend\etl\etl_delta.py `
+  --uof-file "data\UoF_database_1k_subset_100120_to_053126.xlsx" `
+  --arrive-file "data\ARRIVE_Reports_Download_File_7_1_2026.xlsx" `
+  --dry-run
+```
+
+#### macOS or Linux Terminal
+
+```bash
+python3 backend/etl/etl_delta.py \
+  --uof-file "data/UoF_database_1k_subset_100120_to_053126.xlsx" \
+  --arrive-file "data/ARRIVE_Reports_Download_File_7_1_2026.xlsx" \
+  --dry-run
+```
+
+Dry-run mode validates both files and reports how many records are new. It does not insert data or run the cleaning scripts.
+
+### 6. Import and Process the Data
+
+After reviewing the dry-run results, run the loader with the cleaning workflows enabled.
+
+#### Windows PowerShell
+
+```powershell
+py backend\etl\etl_delta.py `
+  --uof-file "data\UoF_database_1k_subset_100120_to_053126.xlsx" `
+  --arrive-file "data\ARRIVE_Reports_Download_File_7_1_2026.xlsx" `
+  --run-cleaners
+```
+
+#### macOS or Linux Terminal
+
+```bash
+python3 backend/etl/etl_delta.py \
+  --uof-file "data/UoF_database_1k_subset_100120_to_053126.xlsx" \
+  --arrive-file "data/ARRIVE_Reports_Download_File_7_1_2026.xlsx" \
+  --run-cleaners
+```
+
+This command:
+
+- Imports only new UoF records and runs `backend/etl/uof_etl/clean_and_populate.py`.
+- Imports only new ARRIVE Together records and runs `backend/etl/arrive_etl/tokenize_arrive_data.py`.
+- Skips records already stored in the database, making the workflow safe to rerun.
+
+### 7. Verify the Database Load
+
+Confirm that records were added to both main tables:
+
+```sql
+SELECT COUNT(*) FROM uof_main_data;
+SELECT COUNT(*) FROM arrive_main_data;
+```
+
+Confirm that no UoF records remain waiting to be processed:
+
+```sql
+SELECT COUNT(*)
+FROM uof_main_processing_table
+WHERE processed = 0;
+```
+
+A result of `0` means that all staged UoF records completed the cleaning workflow.
+
+---
+
+## **SECTION 6:** Configuring and Running the Website
+
+**Section owner: Reuben**
+
+"The website" is two independent pieces that get configured and run differently: the API (`backend/api/bridge.py`, which talks to MySQL) and the frontend (`frontend/index.html`, a static file that talks to the API). Both sections below assume a MySQL database already exists with the schema built and data loaded — see [Section 5: Building the Database from Scratch](#section-5-building-the-database-from-scratch) above.
+
+### Running It Locally
+
+For developing or testing against a database on your own machine.
+
+1. **Prerequisites** — Python 3.9+, and a MySQL database you can already connect to (local or remote) with the schema built and data loaded.
+2. **Set up the Python environment** — Only `requirements.txt` is needed to run the API/frontend — `requirements-etl.txt` is separate and only needed if you're also running the ETL scripts.
+
+   **Windows PowerShell:**
+   ```powershell
+   py -m venv .venv
+   .venv\Scripts\Activate.ps1
+   py -m pip install -r requirements.txt
+   ```
+
+   **macOS or Linux Terminal:**
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   python3 -m pip install -r requirements.txt
+   ```
+3. **Configure the DB connection** — Create a local environment file from the provided template.
+
+   **Windows PowerShell:**
+   ```powershell
+   Copy-Item "backend\config\.env.example" "backend\config\.env"
+   ```
+
+   **macOS or Linux Terminal:**
+   ```bash
+   cp backend/config/.env.example backend/config/.env
+   ```
+
+   Open `backend/config/.env` and fill in `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` for your database. `backend/config/db_config.py` loads all of this automatically — nothing else needs to be touched.
+
+   The `.env` file contains private credentials and must not be committed to GitHub.
+
+   If your database requires SSL (common for managed/cloud MySQL), also set `DB_SSL_CA_PATH` to a CA certificate downloaded from your provider and save it as:
+
+   ```text
+   backend/config/ca.pem
+   ```
+4. **Start the API** — It starts on `http://localhost:5001` — leave it running in its own terminal.
+
+   ```bash
+   python backend/api/bridge.py
+   ```
+5. **Open the frontend** — Double-click `frontend/index.html`, or open it via File → Open in your browser. No build step, no dev server — when opened this way it automatically detects it's running locally and points itself at `http://localhost:5001`, so no further configuration is needed.
+
+### Hosting It
+
+If you are hosting the site on a server, then the configuration will be different than if you were doing so locally. Environment variables get set through your hosting provider rather than a `.env` file, and the frontend needs to be told the API's real, public URL instead of `localhost`.
+
+The exact steps depend on which provider(s) you use, but every provider needs the same things from this project:
+
+1. **A place to run `bridge.py` continuously** — A VM, a container host, or a "deploy from git" platform (Render, Railway, Fly.io, etc.): anything that can keep a Python process alive. Run it with a real WSGI server rather than Flask's local-dev server: `gunicorn backend.api.bridge:app` (`gunicorn` is already in `requirements.txt`). Check your host's docs for how it expects the app to bind to a port — many platforms inject a `$PORT` environment variable rather than letting you hardcode 5001.
+2. **A MySQL database reachable from wherever `bridge.py` ends up running** — For a managed/cloud database, this usually means allow-listing the API host's outbound IP or otherwise confirming the provider accepts connections from outside your own machine. If it requires SSL, follow the same `DB_SSL_CA_PATH` steps as local dev, but as an absolute path — many hosts offer a "secret file" mechanism for exactly this.
+3. **Environment variables set through your host, not a `.env` file** — `.env` files are a local-dev convenience — `db_config.py`'s `load_dotenv()` call silently does nothing if the file isn't there, which is exactly the case in production. Instead, set `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` (and `FLASK_SECRET_KEY`, if you want session signing to be more than a placeholder) directly through whatever mechanism your host provides — a dashboard, a systemd unit's `Environment=` lines, a container's env config, etc.
+4. **Point the frontend at the API's public URL** — Once `bridge.py` is reachable at a real URL, update the `BASE` constant in `frontend/index.html` (currently line 449) — it falls back to a placeholder URL whenever it doesn't detect a local environment. This is the one line of application code you need to change to re-host this project somewhere new.
+5. **Serve `frontend/index.html` from somewhere reachable** — It's a single self-contained static file with no build step and no server-side logic, so any static file host works — GitHub Pages, Netlify, S3, or even the same host running the API.
+6. **CORS** — `bridge.py` already enables CORS for all origins, so the frontend will be able to reach the API regardless of where each ends up hosted. Worth restricting to your actual frontend's origin once you're past initial testing.
+
+---
+
+## **SECTION 7:** Running the Delta Loader
+
+**Section owner: Omar**
+
+Use `backend/etl/etl_delta.py` whenever updated UoF or ARRIVE Together Excel files are received. The loader compares the source files with the database and imports only records that have not already been loaded.
+
+The database connection must be configured before running the loader.
+
+### Preview an Update
+
+Always begin with a dry run.
+
+#### Windows PowerShell
+
+```powershell
+py backend\etl\etl_delta.py `
+  --uof-file "data\UoF_database_1k_subset_100120_to_053126.xlsx" `
+  --arrive-file "data\ARRIVE_Reports_Download_File_7_1_2026.xlsx" `
+  --dry-run
+```
+
+#### macOS or Linux Terminal
+
+```bash
+python3 backend/etl/etl_delta.py \
+  --uof-file "data/UoF_database_1k_subset_100120_to_053126.xlsx" \
+  --arrive-file "data/ARRIVE_Reports_Download_File_7_1_2026.xlsx" \
+  --dry-run
+```
+
+Review the reported record counts before continuing. Dry-run mode does not insert data or run the cleaning scripts.
+
+### Import New Records
+
+After reviewing the dry-run results, run the update.
+
+#### Windows PowerShell
+
+```powershell
+py backend\etl\etl_delta.py `
+  --uof-file "data\UoF_database_1k_subset_100120_to_053126.xlsx" `
+  --arrive-file "data\ARRIVE_Reports_Download_File_7_1_2026.xlsx" `
+  --run-cleaners
+```
+
+#### macOS or Linux Terminal
+
+```bash
+python3 backend/etl/etl_delta.py \
+  --uof-file "data/UoF_database_1k_subset_100120_to_053126.xlsx" \
+  --arrive-file "data/ARRIVE_Reports_Download_File_7_1_2026.xlsx" \
+  --run-cleaners
+```
+
+The loader will:
+
+- Import only new records from each dataset.
+- Skip records already stored in the database.
+- Run the UoF cleaning and standardization workflow.
+- Run the ARRIVE Together tokenization workflow.
+
+### Update Only the UoF Dataset
+
+#### Windows PowerShell
+
+Preview the update:
+
+```powershell
+py backend\etl\etl_delta.py `
+  --uof-file "data\UoF_database_1k_subset_100120_to_053126.xlsx" `
+  --dry-run
+```
+
+Import and process the new records:
+
+```powershell
+py backend\etl\etl_delta.py `
+  --uof-file "data\UoF_database_1k_subset_100120_to_053126.xlsx" `
+  --run-cleaners
+```
+
+#### macOS or Linux Terminal
+
+Preview the update:
+
+```bash
+python3 backend/etl/etl_delta.py \
+  --uof-file "data/UoF_database_1k_subset_100120_to_053126.xlsx" \
+  --dry-run
+```
+
+Import and process the new records:
+
+```bash
+python3 backend/etl/etl_delta.py \
+  --uof-file "data/UoF_database_1k_subset_100120_to_053126.xlsx" \
+  --run-cleaners
+```
+
+### Update Only the ARRIVE Together Dataset
+
+#### Windows PowerShell
+
+Preview the update:
+
+```powershell
+py backend\etl\etl_delta.py `
+  --arrive-file "data\ARRIVE_Reports_Download_File_7_1_2026.xlsx" `
+  --dry-run
+```
+
+Import and process the new records:
+
+```powershell
+py backend\etl\etl_delta.py `
+  --arrive-file "data\ARRIVE_Reports_Download_File_7_1_2026.xlsx" `
+  --run-cleaners
+```
+
+#### macOS or Linux Terminal
+
+Preview the update:
+
+```bash
+python3 backend/etl/etl_delta.py \
+  --arrive-file "data/ARRIVE_Reports_Download_File_7_1_2026.xlsx" \
+  --dry-run
+```
+
+Import and process the new records:
+
+```bash
+python3 backend/etl/etl_delta.py \
+  --arrive-file "data/ARRIVE_Reports_Download_File_7_1_2026.xlsx" \
+  --run-cleaners
+```
+
+### Optional Batch Size
+
+The default insert batch size is 500 rows. A different batch size can be added to any command.
+
+#### Windows PowerShell
+
+```powershell
+--batch-size 1000
+```
+
+#### macOS or Linux Terminal
+
+```bash
+--batch-size 1000
+```
+
+Replace the example filenames with the paths to the most recent source files.
+<!-- 
 ## What it is
 
 A tool for turning a New Jersey **Use of Force (UoF)** incident dataset — currently distributed as an Excel file (`data/UoF_database_1k_subset_100120_to_053126.xlsx`, ~1k rows) — into a clean, queryable MySQL database, with a browser-based UI for building filtered queries and paging through results. The repo name (`use_of_force_database_redesign_project`) signals this is a **redesign** of an existing/prior UoF database, not a greenfield build — the messiness handled in the ETL layer (misspellings, inconsistent formats, multi-value fields) is inherited from that source data.
@@ -276,4 +795,4 @@ Per the README's own annotations:
 If you're handing this to another AI to continue the work, the natural next step is clearly **building the API layer** to connect `query-builder.html`'s generated query to a live MySQL execution, returning JSON that `results-viewer.html` can consume directly instead of via copy-paste — at which point the query builder's string-interpolated SQL construction should be replaced with parameterized queries server-side.
 
 ---
-
+ -->
