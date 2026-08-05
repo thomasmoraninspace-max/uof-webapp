@@ -4,32 +4,34 @@ View live at: https://1reubent.github.io/uof-webapp/
 
 ## Table of Contents
 
-- [Section 1: What Is This Project](#section-1-what-is-this-project)
-- [Section 2: Database Schema Design Decisions](#section-2-database-schema-design-decisions)
-- [Section 3: Code Repository Structure](#section-3-code-repository-structure)
-  - [Important Files](#important-files)
-  - [Files That Aren't Important to the Project](#files-that-arent-important-to-the-project)
-- [Section 4: Key Code Files, Broken Down](#section-4-key-code-files-broken-down-bridge-clean_and_populate-etl_delta)
-  - [`backend/api/bridge.py` — The API Layer](#backendapibridgepy--the-api-layer)
-  - [`backend/etl/uof_etl/clean_and_populate.py` — The Cleaning Core](#backendetluof_etlclean_and_populatepy--the-cleaning-core)
-  - [`backend/etl/etl_delta.py` — The Incremental Loader](#backendetletl_deltapy--the-incremental-loader)
-- [Section 5: Building the Database from Scratch](#section-5-building-the-database-from-scratch)
-  - [1. Install the Python Dependencies](#1-install-the-python-dependencies)
-  - [2. Configure the Database Connection](#2-configure-the-database-connection)
-  - [3. Create the Database Tables and Reference Data](#3-create-the-database-tables-and-reference-data)
-  - [4. Add the Source Files](#4-add-the-source-files)
-  - [5. Preview the Initial Load](#5-preview-the-initial-load)
-  - [6. Import and Process the Data](#6-import-and-process-the-data)
-  - [7. Verify the Database Load](#7-verify-the-database-load)
-- [Section 6: Configuring and Running the Website](#section-6-configuring-and-running-the-website)
-  - [Running It Locally](#running-it-locally)
-  - [Hosting It](#hosting-it)
-- [Section 7: Running the Delta Loader](#section-7-running-the-delta-loader)
-  - [Preview an Update](#preview-an-update)
-  - [Import New Records](#import-new-records)
-  - [Update Only the UoF Dataset](#update-only-the-uof-dataset)
-  - [Update Only the ARRIVE Together Dataset](#update-only-the-arrive-together-dataset)
-  - [Optional Batch Size](#optional-batch-size)
+- [Part 1: Understanding the Project](#part-1-understanding-the-project)
+  - [Section 1: What Is This Project](#section-1-what-is-this-project)
+  - [Section 2: Database Schema Design Decisions](#section-2-database-schema-design-decisions)
+  - [Section 3: Code Repository Structure](#section-3-code-repository-structure)
+    - [Important Files](#important-files)
+    - [Files That Aren't Important to the Project](#files-that-arent-important-to-the-project)
+  - [Section 4: Key Code Files, Broken Down](#section-4-key-code-files-broken-down-bridge-clean_and_populate-etl_delta)
+    - [`backend/api/bridge.py` — The API Layer](#backendapibridgepy--the-api-layer)
+    - [`backend/etl/uof_etl/clean_and_populate.py` — The Cleaning Core](#backendetluof_etlclean_and_populatepy--the-cleaning-core)
+    - [`backend/etl/etl_delta.py` — The Incremental Loader](#backendetletl_deltapy--the-incremental-loader)
+- [Part 2: Setup and Operations](#part-2-setup-and-operations)
+  - [Section 5: Building the Database from Scratch](#section-5-building-the-database-from-scratch)
+    - [1. Install the Python Dependencies](#1-install-the-python-dependencies)
+    - [2. Configure the Database Connection](#2-configure-the-database-connection)
+    - [3. Create the Database Tables and Reference Data](#3-create-the-database-tables-and-reference-data)
+    - [4. Add the Source Files](#4-add-the-source-files)
+    - [5. Preview the Initial Load](#5-preview-the-initial-load)
+    - [6. Import and Process the Data](#6-import-and-process-the-data)
+    - [7. Verify the Database Load](#7-verify-the-database-load)
+  - [Section 6: Configuring and Running the Website](#section-6-configuring-and-running-the-website)
+    - [Running It Locally](#running-it-locally)
+    - [Hosting It](#hosting-it)
+  - [Section 7: Running the Delta Loader](#section-7-running-the-delta-loader)
+    - [Preview an Update](#preview-an-update)
+    - [Import New Records](#import-new-records)
+    - [Update Only the UoF Dataset](#update-only-the-uof-dataset)
+    - [Update Only the ARRIVE Together Dataset](#update-only-the-arrive-together-dataset)
+    - [Optional Batch Size](#optional-batch-size)
 
 <!-- ## Documentation Assignments
 
@@ -41,7 +43,9 @@ View live at: https://1reubent.github.io/uof-webapp/
 
 ---
 
-## **SECTION 1:** What Is This Project
+## **PART 1:** Understanding the Project
+
+### **SECTION 1:** What Is This Project
 
 A tool that turns two New Jersey public-safety datasets — **Use of Force (UoF)** incident reports and **ARRIVE Together** program data — from raw Excel exports into clean, queryable MySQL databases, with a single browser-based UI for filtering and paging through both.
 
@@ -56,7 +60,7 @@ Together, these four layers work as a unified system. Filtering in the browser p
 
 ---
 
-## **SECTION 2:** Database Schema Design Decisions
+### **SECTION 2:** Database Schema Design Decisions
 
 **Section owner: Omar**
 
@@ -83,7 +87,7 @@ Table Breakdown:
 
 ---
 
-## **SECTION 3:** Code Repository Structure
+### **SECTION 3:** Code Repository Structure
 
 **Section owner: Reuben**
 
@@ -126,7 +130,7 @@ uof-webapp/
 └── requirements-etl.txt                 ← ETL-only dependencies (pandas/numpy/openpyxl)
 ```
 
-### Important Files
+#### Important Files
 
 A one-line orientation to everything in the tree above. Three of these — `bridge.py`, `clean_and_populate.py`, and `etl_delta.py` — are covered in more depth in [Section 4: Key Code Files, Broken Down](#section-4-key-code-files-broken-down-bridge-clean_and_populate-etl_delta) below, as they might be important to understand if you plan on hosting this project's API and database.
 
@@ -156,20 +160,20 @@ A one-line orientation to everything in the tree above. Three of these — `brid
 
 Again, the three most important files to understand if you plan on hosting this project's API and database on your own infrastructure are `bridge.py` (the API file), `clean_and_populate.py` (the UoF cleaning procedure), and `etl_delta.py` (the delta loader). These are explained in depth in the [Section 4: Key Code Files, Broken Down](#section-4-key-code-files-broken-down-bridge-clean_and_populate-etl_delta) section.
 
-### Files That Aren't Important to the Project
+#### Files That Aren't Important to the Project
 
 - **`render.yaml`** — The Render deployment blueprint, since the API was hosted on Render for development.
 - **`docs/`** — A mix of early planning artifacts (`Project_Charter_Document.pdf`, the two `.docx` form-design docs) and an earlier two-file frontend prototype (`query-builder.html`, `results-viewer.html`) that `frontend/index.html` has since replaced with a live-querying single page. Worth a skim for original project scope/intent, but none of it is part of the running application.
 
 ---
 
-## **SECTION 4:** Key Code Files, Broken Down (`bridge`, `clean_and_populate`, `etl_delta`)
+### **SECTION 4:** Key Code Files, Broken Down (`bridge`, `clean_and_populate`, `etl_delta`)
 
 **Section owner: Reuben**
 
 If you're hosting this project's API and database on your own infrastructure, these are the three files that might be worth understanding.
 
-### `backend/api/bridge.py` — The API Layer
+#### `backend/api/bridge.py` — The API Layer
 
 This is where the MySQL connection is opened on the frontend's behalf in order to answer the user's queries live. Everything else in `backend/` is offline data-prep; `bridge.py` is the live, always-running piece.
 
@@ -186,7 +190,7 @@ This is where the MySQL connection is opened on the frontend's behalf in order t
 
 The main SQL query-building logic is in the functions `build_uof_sql()` and `build_arrive_sql()` in `bridge.py`. The primary thing to understand here is how multi-value columns are queried using our `uof_dashboard_values_data` and `arrive_values_data` tables. Since only multi-value columns that actually have multiple values get tokenized, the query needs to check both tables: for a given row and multi-value column, it either has a match in `uof_main_data` or a match in the dashboard values table, but not both. Code: [[L457-477](backend/api/bridge.py#L457-L477)]
 
-### `backend/etl/uof_etl/clean_and_populate.py` — The Cleaning Core
+#### `backend/etl/uof_etl/clean_and_populate.py` — The Cleaning Core
 
 This is the code that runs our cleaning/ETL pipeline after we've imported the data.
 
@@ -200,7 +204,7 @@ This is the code that runs our cleaning/ETL pipeline after we've imported the da
 - **Read the inline comments before changing `bool_cols`/`int_cols`**: certain boolean columns (Subject_Arrested) and certain integer columns (Subject_Age) are not added to `bool_cols`/`int_cols` because they are actually stored as strings, because they're multi-value. The inline comments explain further about this.
 - **Depends on**: the staging table (`uof_main_processing_table`) and the reference/seed tables (`standard_values_table`, `uof_column_values_data`) being already populated
 
-### `backend/etl/etl_delta.py` — The Incremental Loader
+#### `backend/etl/etl_delta.py` — The Incremental Loader
 
 This tool handles new monthly/quarterly exports for **both** datasets — an alternative to re-running `import_script.py`/`import_arrive_data.py` against a full re-export every time. `--uof-file` and `--arrive-file` are independent: pass either one, or both, and each dataset's delta runs on its own.
 
@@ -210,41 +214,43 @@ This tool handles new monthly/quarterly exports for **both** datasets — an alt
 
 ---
 
-## **SECTION 5:** Building the Database from Scratch
+## **PART 2:** Setup and Operations
+
+### **SECTION 5:** Building the Database from Scratch
 
 **Section owner: Omar**
 
 Follow these steps when setting up a new or empty database. Run all commands from the project's root folder.
 
-### 1. Install the Python Dependencies
+#### 1. Install the Python Dependencies
 
 Install the packages required by the web application and ETL scripts.
 
-#### Windows PowerShell
+##### Windows PowerShell
 
 ```powershell
 py -m pip install -r requirements.txt
 py -m pip install -r requirements-etl.txt
 ```
 
-#### macOS or Linux Terminal
+##### macOS or Linux Terminal
 
 ```bash
 python3 -m pip install -r requirements.txt
 python3 -m pip install -r requirements-etl.txt
 ```
 
-### 2. Configure the Database Connection
+#### 2. Configure the Database Connection
 
 Create a local environment file from the provided template.
 
-#### Windows PowerShell
+##### Windows PowerShell
 
 ```powershell
 Copy-Item "backend\config\.env.example" "backend\config\.env"
 ```
 
-#### macOS or Linux Terminal
+##### macOS or Linux Terminal
 
 ```bash
 cp backend/config/.env.example backend/config/.env
@@ -260,7 +266,7 @@ If your database requires SSL (common for managed/cloud MySQL), also set `DB_SSL
 backend/config/ca.pem
 ```
 
-### 3. Create the Database Tables and Reference Data
+#### 3. Create the Database Tables and Reference Data
 
 Use MySQL Workbench, the Aiven Query Editor, or another MySQL client to run these files in order:
 
@@ -270,7 +276,7 @@ Use MySQL Workbench, the Aiven Query Editor, or another MySQL client to run thes
 
 `schema.sql` creates the UoF and ARRIVE Together database tables. The seed files load the reference values used during data cleaning and standardization.
 
-### 4. Add the Source Files
+#### 4. Add the Source Files
 
 Place the Use of Force and ARRIVE Together Excel files in the project's `data` folder.
 
@@ -281,11 +287,11 @@ Example files included with the project:
 
 Replace these filenames with the latest source files when updated datasets are released.
 
-### 5. Preview the Initial Load
+#### 5. Preview the Initial Load
 
 Run the delta loader in dry-run mode before inserting data.
 
-#### Windows PowerShell
+##### Windows PowerShell
 
 ```powershell
 py backend\etl\etl_delta.py `
@@ -294,7 +300,7 @@ py backend\etl\etl_delta.py `
   --dry-run
 ```
 
-#### macOS or Linux Terminal
+##### macOS or Linux Terminal
 
 ```bash
 python3 backend/etl/etl_delta.py \
@@ -305,11 +311,11 @@ python3 backend/etl/etl_delta.py \
 
 Dry-run mode validates both files and reports how many records are new. It does not insert data or run the cleaning scripts.
 
-### 6. Import and Process the Data
+#### 6. Import and Process the Data
 
 After reviewing the dry-run results, run the loader with the cleaning workflows enabled.
 
-#### Windows PowerShell
+##### Windows PowerShell
 
 ```powershell
 py backend\etl\etl_delta.py `
@@ -318,7 +324,7 @@ py backend\etl\etl_delta.py `
   --run-cleaners
 ```
 
-#### macOS or Linux Terminal
+##### macOS or Linux Terminal
 
 ```bash
 python3 backend/etl/etl_delta.py \
@@ -333,7 +339,7 @@ This command:
 - Imports only new ARRIVE Together records and runs `backend/etl/arrive_etl/tokenize_arrive_data.py`.
 - Skips records already stored in the database, making the workflow safe to rerun.
 
-### 7. Verify the Database Load
+#### 7. Verify the Database Load
 
 Confirm that records were added to both main tables:
 
@@ -354,13 +360,13 @@ A result of `0` means that all staged UoF records completed the cleaning workflo
 
 ---
 
-## **SECTION 6:** Configuring and Running the Website
+### **SECTION 6:** Configuring and Running the Website
 
 **Section owner: Reuben**
 
 "The website" is two independent pieces that get configured and run differently: the API (`backend/api/bridge.py`, which talks to MySQL) and the frontend (`frontend/index.html`, a static file that talks to the API). Both sections below assume a MySQL database already exists with the schema built and data loaded — see [Section 5: Building the Database from Scratch](#section-5-building-the-database-from-scratch) above.
 
-### Running It Locally
+#### Running It Locally
 
 For developing or testing against a database on your own machine.
 
@@ -408,7 +414,7 @@ For developing or testing against a database on your own machine.
    ```
 5. **Open the frontend** — Double-click `frontend/index.html`, or open it via File → Open in your browser. No build step, no dev server — when opened this way it automatically detects it's running locally and points itself at `http://localhost:5001`, so no further configuration is needed.
 
-### Hosting It
+#### Hosting It
 
 If you are hosting the site on a server, then the configuration will be different than if you were doing so locally. Environment variables get set through your hosting provider rather than a `.env` file, and the frontend needs to be told the API's real, public URL instead of `localhost`.
 
@@ -423,7 +429,7 @@ The exact steps depend on which provider(s) you use, but every provider needs th
 
 ---
 
-## **SECTION 7:** Running the Delta Loader
+### **SECTION 7:** Running the Delta Loader
 
 **Section owner: Omar**
 
@@ -431,11 +437,11 @@ Use `backend/etl/etl_delta.py` whenever updated UoF or ARRIVE Together Excel fil
 
 The database connection must be configured before running the loader.
 
-### Preview an Update
+#### Preview an Update
 
 Always begin with a dry run.
 
-#### Windows PowerShell
+##### Windows PowerShell
 
 ```powershell
 py backend\etl\etl_delta.py `
@@ -444,7 +450,7 @@ py backend\etl\etl_delta.py `
   --dry-run
 ```
 
-#### macOS or Linux Terminal
+##### macOS or Linux Terminal
 
 ```bash
 python3 backend/etl/etl_delta.py \
@@ -455,11 +461,11 @@ python3 backend/etl/etl_delta.py \
 
 Review the reported record counts before continuing. Dry-run mode does not insert data or run the cleaning scripts.
 
-### Import New Records
+#### Import New Records
 
 After reviewing the dry-run results, run the update.
 
-#### Windows PowerShell
+##### Windows PowerShell
 
 ```powershell
 py backend\etl\etl_delta.py `
@@ -468,7 +474,7 @@ py backend\etl\etl_delta.py `
   --run-cleaners
 ```
 
-#### macOS or Linux Terminal
+##### macOS or Linux Terminal
 
 ```bash
 python3 backend/etl/etl_delta.py \
@@ -484,9 +490,9 @@ The loader will:
 - Run the UoF cleaning and standardization workflow.
 - Run the ARRIVE Together tokenization workflow.
 
-### Update Only the UoF Dataset
+#### Update Only the UoF Dataset
 
-#### Windows PowerShell
+##### Windows PowerShell
 
 Preview the update:
 
@@ -504,7 +510,7 @@ py backend\etl\etl_delta.py `
   --run-cleaners
 ```
 
-#### macOS or Linux Terminal
+##### macOS or Linux Terminal
 
 Preview the update:
 
@@ -522,9 +528,9 @@ python3 backend/etl/etl_delta.py \
   --run-cleaners
 ```
 
-### Update Only the ARRIVE Together Dataset
+#### Update Only the ARRIVE Together Dataset
 
-#### Windows PowerShell
+##### Windows PowerShell
 
 Preview the update:
 
@@ -542,7 +548,7 @@ py backend\etl\etl_delta.py `
   --run-cleaners
 ```
 
-#### macOS or Linux Terminal
+##### macOS or Linux Terminal
 
 Preview the update:
 
@@ -560,17 +566,17 @@ python3 backend/etl/etl_delta.py \
   --run-cleaners
 ```
 
-### Optional Batch Size
+#### Optional Batch Size
 
 The default insert batch size is 500 rows. A different batch size can be added to any command.
 
-#### Windows PowerShell
+##### Windows PowerShell
 
 ```powershell
 --batch-size 1000
 ```
 
-#### macOS or Linux Terminal
+##### macOS or Linux Terminal
 
 ```bash
 --batch-size 1000
