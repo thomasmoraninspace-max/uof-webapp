@@ -1,29 +1,31 @@
 # =====================================================================
-# etl_delta_fixed.py — Append-only delta loader for UoF data
+# etl_delta.py — Append-only delta loader for UoF and ARRIVE Together
 #
 # Purpose
-#   1. Read a cumulative or incremental Excel export.
-#   2. Identify rows by Form_ID (the row-level source identifier).
-#   3. Insert only unseen Form_IDs into uof_main_processing_table.
-#   4. Optionally run clean_and_populate.py so those staged rows flow through
-#      the same cleaning, standardization, dashboard-value, and exception logic
-#      as the original full load.
+#   1. Read one or both incoming Excel exports.
+#   2. Identify UoF rows by Form_ID and ARRIVE rows by Random_ID.
+#   3. Insert only unseen UoF rows into uof_main_processing_table.
+#   4. Insert only unseen ARRIVE rows into arrive_main_data.
+#   5. Optionally run the existing UoF cleaner and ARRIVE tokenizer.
 #
 # Important
-#   Incident_ID is NOT unique. One incident can contain several Form_ID rows,
-#   so using Incident_ID for delta detection would discard valid records.
+#   UoF Incident_ID is NOT unique. One incident can contain several Form_ID
+#   rows, so UoF delta detection must use Form_ID.
 #
 # Examples
-#   python etl_delta_fixed.py --file "UoF_July_2026.xlsx" --dry-run
-#   python etl_delta_fixed.py --file "UoF_July_2026.xlsx"
-#   python etl_delta_fixed.py --file "UoF_July_2026.xlsx" --run-cleaner
+#   python etl_delta.py --uof-file "UoF_July_2026.xlsx" --dry-run
+#   python etl_delta.py --arrive-file "ARRIVE_July_2026.xlsx" --dry-run
+#   python etl_delta.py --uof-file "UoF_July_2026.xlsx" \
+#       --arrive-file "ARRIVE_July_2026.xlsx" --run-cleaners
 # =====================================================================
 
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -35,8 +37,19 @@ except ModuleNotFoundError:
 import numpy as np
 import pandas as pd
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "config"))
-from db_config import DB_CONFIG
+CONFIG_DIR = os.path.join(
+    os.path.dirname(__file__),
+    "..",
+    "config",
+)
+sys.path.append(CONFIG_DIR)
+
+
+def get_db_config() -> dict[str, Any]:
+    """Load database settings only when a database operation is requested."""
+    from db_config import DB_CONFIG
+
+    return DB_CONFIG
 
 
 COL_MAP = {
@@ -346,102 +359,458 @@ def insert_processing_rows(
     return inserted
 
 
-def run_cleaner() -> None:
-    """Invoke the existing cleaner after staging, when requested."""
+
+# ARRIVE source-to-schema column names.
+ARRIVE_COL_MAP = {
+    "Year of Date_of_Incident": "Incident_Year",
+    "ARRIVE Model": "Arrive_Model",
+    "outreach_attempts": "Outreach_Attempts",
+    "30_Day_Outcomes": "Day_30_Outcomes",
+}
+
+ARRIVE_COLUMNS = [
+    "Random_ID",
+    "Incident_Year",
+    "Arrive_Model",
+    "Behaviors_Indicated_Prior_to_Arrival",
+    "Other_Individuals_on_Scene",
+    "Law_Enforcement_Observed_Behavior",
+    "Law_Enforcement_Outcomes",
+    "Outreach_Attempts",
+    "Mental_Health_Outcome",
+    "Day_30_Outcomes",
+]
+
+ARRIVE_INTEGER_COLUMNS = [
+    "Random_ID",
+    "Incident_Year",
+    "Outreach_Attempts",
+]
+
+# These separators match import_arrive_data.py and tokenize_arrive_data.py.
+ARRIVE_MULTI_VALUE_COLS = {
+    "Arrive_Model": " & ",
+    "Behaviors_Indicated_Prior_to_Arrival": ",",
+    "Other_Individuals_on_Scene": ",",
+    "Law_Enforcement_Observed_Behavior": ",",
+    "Law_Enforcement_Outcomes": ",",
+    "Mental_Health_Outcome": ",",
+    "Day_30_Outcomes": ",",
+}
+
+
+def parse_arrive_list_cell(value: Any, separator: str) -> list[str]:
+    """Decode ARRIVE list-like cells and return clean text tokens."""
+    if pd.isna(value):
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    text = str(value).strip()
+    if not text:
+        return []
+
+    try:
+        parsed = ast.literal_eval(text)
+    except (ValueError, SyntaxError):
+        parsed = None
+
+    if isinstance(parsed, (list, tuple)):
+        return [str(item).strip() for item in parsed if str(item).strip()]
+    if parsed is not None:
+        parsed_text = str(parsed).strip()
+        return [parsed_text] if parsed_text else []
+
+    return [token.strip() for token in text.split(separator) if token.strip()]
+
+
+def load_arrive_source(excel_file: str | Path) -> pd.DataFrame:
+    """Read and validate an ARRIVE Reports Download File export."""
+    excel_path = Path(excel_file).expanduser().resolve()
+    if not excel_path.exists():
+        raise FileNotFoundError(f"ARRIVE Excel file not found: {excel_path}")
+
+    df = pd.read_excel(excel_path)
+    original_rows = len(df)
+    df = df.dropna(how="all").copy()
+    blank_rows = original_rows - len(df)
+    if blank_rows:
+        print(f"  Removed {blank_rows:,} completely blank worksheet rows")
+
+    df = df.rename(columns=ARRIVE_COL_MAP)
+
+    if "Random_ID" not in df.columns:
+        raise ValueError(
+            "ARRIVE source file is missing the required 'Random_ID' column."
+        )
+
+    unexpected = [col for col in df.columns if col not in ARRIVE_COLUMNS]
+    if unexpected:
+        print(
+            "  WARNING: dropping ARRIVE columns not present in the database "
+            f"schema: {unexpected}"
+        )
+        df = df.drop(columns=unexpected)
+
+    missing_columns = [col for col in ARRIVE_COLUMNS if col not in df.columns]
+    for col in missing_columns:
+        df[col] = None
+    if missing_columns:
+        print(
+            f"  Added {len(missing_columns)} missing ARRIVE schema column(s) "
+            f"as NULL: {missing_columns}"
+        )
+
+    random_numeric = pd.to_numeric(df["Random_ID"], errors="coerce")
+    missing_id_mask = random_numeric.isna()
+    if missing_id_mask.any():
+        print(
+            f"  WARNING: dropping {int(missing_id_mask.sum()):,} ARRIVE row(s) "
+            "with no Random_ID"
+        )
+        df = df.loc[~missing_id_mask].copy()
+        random_numeric = random_numeric.loc[~missing_id_mask]
+
+    non_integer_mask = (random_numeric % 1) != 0
+    if non_integer_mask.any():
+        samples = (
+            df.loc[non_integer_mask, "Random_ID"].head(5).tolist()
+        )
+        raise ValueError(
+            f"Random_ID must be an integer. Bad sample values: {samples}"
+        )
+    df["Random_ID"] = random_numeric.astype("Int64")
+
+    duplicate_mask = df.duplicated(subset=["Random_ID"], keep=False)
+    if duplicate_mask.any():
+        duplicate_ids = (
+            df.loc[duplicate_mask, "Random_ID"]
+            .astype(str)
+            .drop_duplicates()
+            .head(10)
+            .tolist()
+        )
+        raise ValueError(
+            "The incoming ARRIVE file contains duplicate Random_ID values. "
+            f"Resolve them before loading. Sample IDs: {duplicate_ids}"
+        )
+
+    for col in ["Incident_Year", "Outreach_Attempts"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+
+    for col, separator in ARRIVE_MULTI_VALUE_COLS.items():
+        display_separator = ", " if separator == "," else separator
+        df[col] = df[col].map(
+            lambda value, sep=separator, display=display_separator: (
+                display.join(parse_arrive_list_cell(value, sep)) or None
+            )
+        )
+
+    # Keep all remaining text fields as literal strings.
+    for col in ARRIVE_COLUMNS:
+        if col not in ARRIVE_INTEGER_COLUMNS and col not in ARRIVE_MULTI_VALUE_COLS:
+            df[col] = df[col].map(normalize_text_value)
+
+    return df[ARRIVE_COLUMNS]
+
+
+def fetch_existing_random_ids(
+    cursor: Any,
+    incoming_ids: list[int],
+    query_chunk_size: int = 10_000,
+) -> set[int]:
+    """Find incoming Random_ID values already present in arrive_main_data."""
+    existing: set[int] = set()
+
+    for batch in chunks(incoming_ids, query_chunk_size):
+        placeholders = ", ".join(["%s"] * len(batch))
+        cursor.execute(
+            f"SELECT Random_ID FROM arrive_main_data "
+            f"WHERE Random_ID IN ({placeholders})",
+            tuple(batch),
+        )
+        existing.update(
+            int(row[0]) for row in cursor.fetchall() if row[0] is not None
+        )
+
+    return existing
+
+
+def insert_arrive_rows(
+    cursor: Any,
+    conn: Any,
+    df: pd.DataFrame,
+    batch_size: int,
+) -> int:
+    """Insert ARRIVE rows in batches, isolating any row-level failures."""
+    columns = list(df.columns)
+    quoted_columns = ", ".join(f"`{col}`" for col in columns)
+    placeholders = ", ".join(["%s"] * len(columns))
+    sql = (
+        f"INSERT INTO arrive_main_data ({quoted_columns}) "
+        f"VALUES ({placeholders})"
+    )
+
+    rows = [
+        tuple(to_native(value) for value in row)
+        for row in df.itertuples(index=False, name=None)
+    ]
+
+    inserted = 0
+    failed_rows: list[tuple[int, str]] = []
+
+    for start in range(0, len(rows), batch_size):
+        batch = rows[start : start + batch_size]
+        try:
+            cursor.executemany(sql, batch)
+            conn.commit()
+            inserted += len(batch)
+            print(f"  Inserted {inserted:,} of {len(rows):,} ARRIVE row(s)")
+        except mysql_connector.Error as batch_error:
+            conn.rollback()
+            print(
+                f"  Batch {start + 1}-{start + len(batch)} failed "
+                f"({batch_error}); checking rows individually"
+            )
+            for offset, row in enumerate(batch):
+                try:
+                    cursor.execute(sql, row)
+                    conn.commit()
+                    inserted += 1
+                except mysql_connector.Error as row_error:
+                    conn.rollback()
+                    source_row = start + offset + 1
+                    failed_rows.append((source_row, str(row_error)))
+                    print(f"    ARRIVE source row {source_row} failed: {row_error}")
+
+    if failed_rows:
+        sample = "; ".join(
+            f"row {row_number}: {error}"
+            for row_number, error in failed_rows[:5]
+        )
+        raise RuntimeError(
+            f"{len(failed_rows)} ARRIVE row(s) failed to insert. "
+            f"Sample errors: {sample}"
+        )
+
+    return inserted
+
+
+def run_uof_cleaner() -> None:
+    """Invoke the existing UoF cleaner after staging, when requested."""
     uof_etl_dir = Path(__file__).resolve().parent / "uof_etl"
     sys.path.insert(0, str(uof_etl_dir))
     cleaner = importlib.import_module("clean_and_populate")
     cleaner.clean_uof_data()
 
 
-def main(excel_file: str, batch_size: int, dry_run: bool, should_clean: bool) -> None:
-    print("\n" + "=" * 64)
+def run_arrive_tokenizer() -> None:
+    """Run the existing ARRIVE tokenizer as a separate Python process."""
+    tokenizer_path = (
+        Path(__file__).resolve().parent
+        / "arrive_etl"
+        / "tokenize_arrive_data.py"
+    )
+    subprocess.run(
+        [sys.executable, str(tokenizer_path)],
+        check=True,
+    )
+
+
+def run_uof_delta(
+    excel_file: str,
+    batch_size: int,
+    dry_run: bool,
+) -> None:
+    print("\n" + "=" * 68)
     print(f"UoF append-only delta load: {Path(excel_file).name}")
     print("Identity key: Form_ID")
     print("Target table: uof_main_processing_table")
-    print("=" * 64)
+    print("=" * 68)
 
-    print("\n[1/4] Reading and validating source file...")
+    print("\n[UoF 1/3] Reading and validating source file...")
     df = load_source(excel_file)
-    print(f"  {len(df):,} valid source row(s)")
+    print(f"  {len(df):,} valid UoF source row(s)")
 
     if df.empty:
         print("  Nothing to compare or load.")
         return
 
-    print("\n[2/4] Connecting and checking existing Form_ID values...")
-    if mysql_connector is None:
-        raise ModuleNotFoundError(
-            "mysql-connector-python is required for database operations. "
-            "Install it with: pip install mysql-connector-python"
-        )
-    conn = mysql_connector.connect(**DB_CONFIG)
+    print("\n[UoF 2/3] Checking existing Form_ID values...")
+    conn = mysql_connector.connect(**get_db_config())
     cursor = conn.cursor()
 
     try:
         incoming_ids = [int(value) for value in df["Form_ID"].tolist()]
-        existing_main, existing_processing = fetch_existing_form_ids(cursor, incoming_ids)
+        existing_main, existing_processing = fetch_existing_form_ids(
+            cursor, incoming_ids
+        )
         existing_any = existing_main | existing_processing
 
         df_new = df.loc[~df["Form_ID"].isin(existing_any)].copy()
         skipped = len(df) - len(df_new)
 
         print(f"  Already in uof_main_data: {len(existing_main):,}")
-        print(f"  Already in processing table: {len(existing_processing):,}")
-        print(f"  New Form_ID rows: {len(df_new):,}")
-        print(f"  Existing rows skipped: {skipped:,}")
+        print(
+            "  Already in uof_main_processing_table: "
+            f"{len(existing_processing):,}"
+        )
+        print(f"  New UoF Form_ID rows: {len(df_new):,}")
+        print(f"  Existing UoF rows skipped: {skipped:,}")
 
         if dry_run:
-            print("\n[3/4] Dry run: no rows inserted.")
+            print("\n[UoF 3/3] Dry run: no UoF rows inserted.")
         elif df_new.empty:
-            print("\n[3/4] No new rows to stage.")
+            print("\n[UoF 3/3] No new UoF rows to stage.")
         else:
-            print("\n[3/4] Staging new rows for the normal cleaning pipeline...")
+            print("\n[UoF 3/3] Staging rows for the UoF cleaning pipeline...")
             insert_processing_rows(cursor, conn, df_new, batch_size)
-
     finally:
         cursor.close()
         conn.close()
 
-    if should_clean and not dry_run:
-        print("\n[4/4] Running clean_and_populate.py...")
-        run_cleaner()
-    elif should_clean and dry_run:
-        print("\n[4/4] Cleaner not run during dry-run mode.")
-    else:
-        print("\n[4/4] Cleaner not requested.")
-        print("  Run clean_and_populate.py separately, or rerun with --run-cleaner.")
 
-    print("\nDelta load complete.")
+def run_arrive_delta(
+    excel_file: str,
+    batch_size: int,
+    dry_run: bool,
+) -> None:
+    print("\n" + "=" * 68)
+    print(f"ARRIVE append-only delta load: {Path(excel_file).name}")
+    print("Identity key: Random_ID")
+    print("Target table: arrive_main_data")
+    print("=" * 68)
+
+    print("\n[ARRIVE 1/3] Reading and validating source file...")
+    df = load_arrive_source(excel_file)
+    print(f"  {len(df):,} valid ARRIVE source row(s)")
+
+    if df.empty:
+        print("  Nothing to compare or load.")
+        return
+
+    print("\n[ARRIVE 2/3] Checking existing Random_ID values...")
+    conn = mysql_connector.connect(**get_db_config())
+    cursor = conn.cursor()
+
+    try:
+        incoming_ids = [int(value) for value in df["Random_ID"].tolist()]
+        existing = fetch_existing_random_ids(cursor, incoming_ids)
+        df_new = df.loc[~df["Random_ID"].isin(existing)].copy()
+        skipped = len(df) - len(df_new)
+
+        print(f"  Already in arrive_main_data: {len(existing):,}")
+        print(f"  New ARRIVE Random_ID rows: {len(df_new):,}")
+        print(f"  Existing ARRIVE rows skipped: {skipped:,}")
+
+        if dry_run:
+            print("\n[ARRIVE 3/3] Dry run: no ARRIVE rows inserted.")
+        elif df_new.empty:
+            print("\n[ARRIVE 3/3] No new ARRIVE rows to insert.")
+        else:
+            print("\n[ARRIVE 3/3] Inserting new ARRIVE rows...")
+            insert_arrive_rows(cursor, conn, df_new, batch_size)
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def main(
+    uof_file: str | None,
+    arrive_file: str | None,
+    batch_size: int,
+    dry_run: bool,
+    run_cleaners: bool,
+) -> None:
+    if mysql_connector is None:
+        raise ModuleNotFoundError(
+            "mysql-connector-python is required for database operations. "
+            "Install it with: pip install mysql-connector-python"
+        )
+
+    print("\nCombined UoF and ARRIVE delta workflow")
+    print(f"Mode: {'DRY RUN' if dry_run else 'LOAD'}")
+
+    if uof_file:
+        run_uof_delta(uof_file, batch_size, dry_run)
+
+    if arrive_file:
+        run_arrive_delta(arrive_file, batch_size, dry_run)
+
+    if run_cleaners and dry_run:
+        print("\nCleaners were requested but are not run during dry-run mode.")
+    elif run_cleaners:
+        if uof_file:
+            print("\nRunning UoF clean_and_populate.py...")
+            run_uof_cleaner()
+        if arrive_file:
+            print("\nRunning ARRIVE tokenize_arrive_data.py...")
+            run_arrive_tokenizer()
+    else:
+        print("\nCleaning/tokenization not requested.")
+        if uof_file:
+            print("  UoF: run with --run-cleaners to process staged rows.")
+        if arrive_file:
+            print("  ARRIVE: run with --run-cleaners to rebuild token values.")
+
+    print("\nCombined delta workflow complete.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description=(
-            "Stage only unseen UoF Form_ID rows, optionally running the existing "
-            "cleaning pipeline afterward."
+            "Load only unseen UoF and/or ARRIVE records, optionally running "
+            "their existing cleaning/tokenization workflows afterward."
         )
     )
-    parser.add_argument("--file", required=True, help="Path to the incoming Excel file")
+    parser.add_argument(
+        "--uof-file",
+        help="Path to an incoming UoF Excel file",
+    )
+    parser.add_argument(
+        "--arrive-file",
+        help="Path to an incoming ARRIVE Reports Download File",
+    )
+    parser.add_argument(
+        "--file",
+        dest="legacy_uof_file",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--batch-size",
         type=int,
         default=500,
-        help="Rows committed per staging batch (default: 500)",
+        help="Rows committed per insert batch (default: 500)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Compare with the database and report the delta without inserting",
+        help="Report both deltas without inserting or running cleaners",
     )
     parser.add_argument(
+        "--run-cleaners",
         "--run-cleaner",
+        dest="run_cleaners",
         action="store_true",
-        help="Run clean_and_populate.py after staging new rows",
+        help=(
+            "Run clean_and_populate.py for UoF and "
+            "tokenize_arrive_data.py for ARRIVE"
+        ),
     )
     args = parser.parse_args()
 
+    uof_file = args.uof_file or args.legacy_uof_file
+    if args.uof_file and args.legacy_uof_file:
+        parser.error("Use --uof-file or --file, not both.")
+    if not uof_file and not args.arrive_file:
+        parser.error("Provide --uof-file, --arrive-file, or both.")
     if args.batch_size <= 0:
         parser.error("--batch-size must be greater than zero")
 
-    main(args.file, args.batch_size, args.dry_run, args.run_cleaner)
+    main(
+        uof_file=uof_file,
+        arrive_file=args.arrive_file,
+        batch_size=args.batch_size,
+        dry_run=args.dry_run,
+        run_cleaners=args.run_cleaners,
+    )
